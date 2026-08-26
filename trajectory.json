@@ -1,0 +1,63 @@
+{
+  "total_steps": 3,
+  "total_time_ms": 3826,
+  "meta": {
+    "query": "Скільки електроенергії витрачено сьогодні і які автоматизації у living?",
+    "stop_reason": null,
+    "summary": {
+      "total_steps": 3,
+      "total_time_ms": 3825,
+      "tools_used": [
+        "energy_consumption",
+        "schedule_list",
+        "energy_consumption",
+        "schedule_list"
+      ],
+      "unique_tools": [
+        "energy_consumption",
+        "schedule_list"
+      ]
+    }
+  },
+  "trajectory": [
+    {
+      "step": 1,
+      "node": "agent",
+      "input": "Скільки електроенергії витрачено сьогодні і які автоматизації у living?",
+      "output": "",
+      "tool_calls": [
+        "energy_consumption",
+        "schedule_list"
+      ],
+      "timestamp": "2026-08-26T10:11:11.126775+00:00",
+      "elapsed_ms": 658,
+      "duration_ms": 658,
+      "duration_sec": 0.658
+    },
+    {
+      "step": 1,
+      "node": "tools",
+      "input": "tools=['energy_consumption', 'schedule_list']",
+      "output": "{\"status\": \"ok\", \"data\": {\"period\": \"today\", \"kwh\": 12.4, \"unit\": \"kWh\"}} | {\"status\": \"ok\", \"data\": {\"room\": \"living\", \"count\": 2, \"schedules\": [{\"id\": \"liv-heat-morning\", \"action\": \"hvac_on\", \"time\": \"06:30\", \"enabled\": true}, {\"id\": \"liv-light-evening\", \"action\": \"light_on",
+      "tool_calls": [
+        "energy_consumption",
+        "schedule_list"
+      ],
+      "timestamp": "2026-08-26T10:11:11.132941+00:00",
+      "elapsed_ms": 665,
+      "duration_ms": 6,
+      "duration_sec": 0.006
+    },
+    {
+      "step": 2,
+      "node": "agent",
+      "input": "{\"status\": \"ok\", \"data\": {\"room\": \"living\", \"count\": 2, \"schedules\": [{\"id\": \"liv-heat-morning\", \"action\": \"hvac_on\", \"time\": \"06:30\", \"enabled\": true}, {\"id\": \"liv-light-evening\", \"action\": \"light_on\", \"time\": \"18:00\", \"enabled\": true}]}}",
+      "output": "**Споживання електроенергії сьогодні:** 12.4 kWh.\n\n**Автоматизації у кімнаті `living`:**\n1. **liv-heat-morning** — увімкнути опалення о 06:30 (активна).\n2. **liv-light-evening** — увімкнути світло о 18:00 (активна).",
+      "tool_calls": [],
+      "timestamp": "2026-08-26T10:11:14.292955+00:00",
+      "elapsed_ms": 3825,
+      "duration_ms": 3160,
+      "duration_sec": 3.16
+    }
+  ]
+}

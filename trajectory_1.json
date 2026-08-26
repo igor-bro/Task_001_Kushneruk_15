@@ -1,0 +1,62 @@
+{
+  "total_steps": 3,
+  "total_time_ms": 2437,
+  "meta": {
+    "query": "Яка температура в вітальні і на вулиці?",
+    "stop_reason": null,
+    "summary": {
+      "total_steps": 3,
+      "total_time_ms": 2437,
+      "tools_used": [
+        "sensor_read",
+        "sensor_read",
+        "sensor_read",
+        "sensor_read"
+      ],
+      "unique_tools": [
+        "sensor_read"
+      ]
+    }
+  },
+  "trajectory": [
+    {
+      "step": 1,
+      "node": "agent",
+      "input": "Яка температура в вітальні і на вулиці?",
+      "output": "",
+      "tool_calls": [
+        "sensor_read",
+        "sensor_read"
+      ],
+      "timestamp": "2026-08-26T10:11:04.970939+00:00",
+      "elapsed_ms": 953,
+      "duration_ms": 953,
+      "duration_sec": 0.953
+    },
+    {
+      "step": 1,
+      "node": "tools",
+      "input": "tools=['sensor_read', 'sensor_read']",
+      "output": "{\"status\": \"ok\", \"data\": {\"device_id\": \"living_temp\", \"sensor_type\": \"temperature\", \"room\": \"living\", \"value\": 18.5, \"unit\": \"C\", \"outside_temp_c\": -10.0, \"season\": \"winter\"}} | {\"status\": \"error\", \"error\": \"Невідомий сенсор: outdoor_temp\", \"device_id\": \"outdoor_temp\"}",
+      "tool_calls": [
+        "sensor_read",
+        "sensor_read"
+      ],
+      "timestamp": "2026-08-26T10:11:04.987958+00:00",
+      "elapsed_ms": 970,
+      "duration_ms": 17,
+      "duration_sec": 0.017
+    },
+    {
+      "step": 2,
+      "node": "agent",
+      "input": "{\"status\": \"error\", \"error\": \"Невідомий сенсор: outdoor_temp\", \"device_id\": \"outdoor_temp\"}",
+      "output": "У вітальні **18.5°C**. На вулиці сенсор не знайдено — можливо, він називається інакше (наприклад, `street_temp` або `outdoor_sensor_temp`). Перевір ID сенсора.",
+      "tool_calls": [],
+      "timestamp": "2026-08-26T10:11:06.453574+00:00",
+      "elapsed_ms": 2436,
+      "duration_ms": 1465,
+      "duration_sec": 1.465
+    }
+  ]
+}
