@@ -88,17 +88,25 @@ def _content_preview(msg: Any, limit: int = 400) -> str:
 
 def build_react_graph(
     *,
+    tools: list | None = None,
+    system_prompt: str | None = None,
     safety: SafetyLimits | None = None,
     logger: TrajectoryLogger | None = None,
     checkpointer=None,
 ):
-    """Збирає ReAct-граф із захистом і логуванням."""
+    """Збирає ReAct-граф із захистом і логуванням.
+
+    tools / system_prompt — щоб той самий цикл можна було використати
+    як вкладеного executor у Plan-and-Execute (з knowledge_search тощо).
+    """
+    agent_tools = list(tools) if tools is not None else list(SAFE_TOOLS)
+    prompt = system_prompt if system_prompt is not None else SYSTEM_PROMPT
     limits = safety or SafetyLimits(
         max_steps=DEFAULT_MAX_STEPS,
         timeout_seconds=DEFAULT_TIMEOUT_SECONDS,
     )
     traj = logger or TrajectoryLogger()
-    llm = build_llm().bind_tools(SAFE_TOOLS)
+    llm = build_llm().bind_tools(agent_tools)
 
     def agent_node(state: ReactState) -> dict:
         step = int(state.get("step_count") or 0) + 1
@@ -121,7 +129,7 @@ def build_react_graph(
 
         messages = list(state["messages"])
         if not messages or not isinstance(messages[0], SystemMessage):
-            messages = [SystemMessage(content=SYSTEM_PROMPT)] + messages
+            messages = [SystemMessage(content=prompt)] + messages
 
         response = llm.invoke(messages)
         calls = _tool_calls_as_dicts(response)
@@ -161,7 +169,7 @@ def build_react_graph(
 
     def tools_node(state: ReactState) -> dict:
         """Обгортка ToolNode з логуванням."""
-        node = ToolNode(SAFE_TOOLS)
+        node = ToolNode(agent_tools)
         result = node.invoke(state)
         tool_msgs = [
             m for m in result.get("messages", []) if isinstance(m, ToolMessage)
@@ -194,14 +202,29 @@ def build_react_graph(
     return graph.compile(checkpointer=checkpointer), limits, traj
 
 
-def run_query(
+def invoke_react(
     query: str,
     *,
+    tools: list | None = None,
+    system_prompt: str | None = None,
+    safety: SafetyLimits | None = None,
     config: dict | None = None,
-    trajectory_path: Path | str | None = TRAJECTORY_PATH,
+    trajectory_path: Path | str | None = None,
+    reset_house_state: bool = False,
 ) -> dict:
-    reset_house()
-    app, limits, traj = build_react_graph()
+    """Один повний ReAct-цикл (agent ⇄ tools) для підзадачі.
+
+    Використовується і в demo, і як вкладений executor у Plan-and-Execute.
+    За замовчуванням НЕ скидає mock-дім — щоб кроки P&E бачили спільний стан.
+    """
+    if reset_house_state:
+        reset_house()
+
+    app, limits, traj = build_react_graph(
+        tools=tools,
+        system_prompt=system_prompt,
+        safety=safety,
+    )
     limits.reset()
     traj.reset()
     traj.meta["query"] = query
@@ -219,6 +242,20 @@ def run_query(
     if trajectory_path:
         traj.save(str(trajectory_path))
     return result
+
+
+def run_query(
+    query: str,
+    *,
+    config: dict | None = None,
+    trajectory_path: Path | str | None = TRAJECTORY_PATH,
+) -> dict:
+    return invoke_react(
+        query,
+        config=config,
+        trajectory_path=trajectory_path,
+        reset_house_state=True,
+    )
 
 
 DEMO_QUERIES = [

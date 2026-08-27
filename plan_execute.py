@@ -2,6 +2,9 @@
 
 Граф: START → planner → executor → replanner ⇄ executor | END
 
+Executor виконує КОЖЕН крок плану вкладеним ReAct-агентом
+(повний цикл agent ⇄ tools), а не одноразовим LLM-викликом.
+
 Запуск:
     python plan_execute.py
 """
@@ -13,7 +16,7 @@ import sys
 from typing import Annotated, Any, Literal
 
 from dotenv import load_dotenv
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_mistralai import ChatMistralAI
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
@@ -21,20 +24,37 @@ from typing_extensions import TypedDict
 
 from knowledge import knowledge_search
 from models import Plan, PlanStep, ReplanDecision
-from tools import SAFE_TOOLS, TOOLS_BY_NAME, reset_house
+from react_agent import invoke_react
+from safety import SafetyLimits
+from tools import SAFE_TOOLS, reset_house
 
 load_dotenv()
 
 EXECUTOR_TOOLS = SAFE_TOOLS + [knowledge_search]
-TOOLS_MAP = {**TOOLS_BY_NAME, knowledge_search.name: knowledge_search}
 
 SYSTEM_PLANNER = """\
-Ти planner для Smart Home. Склади план 3–6 кроків.
+Ти planner для Smart Home. Склади план 3–4 кроків.
 Кожен крок: step_id, description, expected_tool
 (sensor_read | device_status | energy_consumption | schedule_list |
 knowledge_search | null).
 НЕ плануй device_control — лише збір стану і рекомендації.
 """
+
+SYSTEM_EXECUTOR = """\
+Ти executor Smart Home (вкладений ReAct). Відповідай українською.
+Мета: виконати РІВНО один крок плану мінімальною кількістю викликів.
+
+Правила:
+1. Якщо в підказці є expected_tool — виклич його ОДИН раз з коректними args.
+2. Після отримання ToolMessage одразу дай стислий підсумок кроку БЕЗ нових tool-calls.
+3. Не викликай зайві tools «про всяк випадок».
+4. device_control недоступний.
+5. Не вигадуй показники — лише дані з tools.
+"""
+
+# Ліміт внутрішнього ReAct на ОДИН крок плану (зовнішній цикл — окремо).
+EXECUTOR_MAX_STEPS = 4
+EXECUTOR_TIMEOUT_SECONDS = 90.0
 
 
 class PlanExecuteState(TypedDict):
@@ -74,26 +94,36 @@ def _format_plan(plan: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _tool_calls(message: AIMessage) -> list[dict[str, Any]]:
-    out = []
-    for call in message.tool_calls or []:
-        if isinstance(call, dict):
-            out.append({"name": call.get("name", "?"), "args": call.get("args") or {}})
-        else:
-            out.append(
-                {
-                    "name": getattr(call, "name", "?"),
-                    "args": getattr(call, "args", {}) or {},
-                }
-            )
-    return out
+def _step_result_from_react(messages: list) -> str:
+    """Підсумок вкладеного ReAct: фінальна відповідь + факти з tools."""
+    if not messages:
+        return ""
+
+    tool_chunks: list[str] = []
+    for msg in messages:
+        if isinstance(msg, ToolMessage):
+            name = getattr(msg, "name", "tool")
+            preview = str(msg.content or "")[:500]
+            tool_chunks.append(f"{name}: {preview}")
+
+    last = messages[-1]
+    final = str(getattr(last, "content", "") or "").strip()
+    # Якщо цикл обрізало safety-лімітом — все одно віддаємо зібрані tool-факти.
+    if final.startswith("⚠️") and tool_chunks:
+        return " | ".join(tool_chunks) + f"\n({final})"
+    if final:
+        if tool_chunks and "status" not in final.lower():
+            return final + "\n[tools] " + " | ".join(tool_chunks[:3])
+        return final
+    if tool_chunks:
+        return " | ".join(tool_chunks)
+    return ""
 
 
 def build_pe_graph(checkpointer=None):
     llm = build_llm()
     planner_llm = llm.with_structured_output(Plan)
     replanner_llm = llm.with_structured_output(ReplanDecision)
-    executor_llm = llm.bind_tools(EXECUTOR_TOOLS)
 
     def planner_node(state: PlanExecuteState) -> dict:
         plan_obj = None
@@ -152,6 +182,7 @@ def build_pe_graph(checkpointer=None):
         }
 
     def executor_node(state: PlanExecuteState) -> dict:
+        """Один крок плану = повний вкладений ReAct-цикл (як у практикумі step6)."""
         idx = state["current_step_idx"]
         plan = state["plan"]
         if idx >= len(plan):
@@ -167,47 +198,38 @@ def build_pe_graph(checkpointer=None):
             )
 
         prompt = (
-            "Ти executor Smart Home. Виконай РІВНО один крок.\n"
-            f"expected_tool: {expected}\n"
-            f"Крок {idx + 1}/{len(plan)}: {desc}\n"
+            f"Виконай наступний крок плану: {desc}\n"
+            f"Це крок {idx + 1} з {len(plan)}.\n"
+            f"expected_tool (підказка): {expected or 'будь-який релевантний'}\n"
             f"{context}\n"
-            "Якщо expected_tool заданий — виклич саме його. "
-            "device_control недоступний."
+            "Якщо expected_tool заданий — віддай перевагу саме йому. "
+            "Використовуй інструменти в ReAct-циклі. Поверни стислий результат кроку."
         )
-        response = executor_llm.invoke([HumanMessage(content=prompt)])
-        calls = _tool_calls(response)
 
-        if expected and expected in TOOLS_MAP:
-            matching = [c for c in calls if c["name"] == expected]
-            if not matching:
-                defaults = {
-                    "sensor_read": {
-                        "device_id": "living_temp",
-                        "sensor_type": "temperature",
-                    },
-                    "device_status": {"device_id": "hvac_living"},
-                    "energy_consumption": {"period": "today"},
-                    "schedule_list": {"room": "living"},
-                    "knowledge_search": {"query": desc},
-                }
-                calls = [{"name": expected, "args": defaults.get(expected, {})}]
-            else:
-                calls = matching
-
-        if not calls:
-            step_result = str(response.content).strip() or "Крок без tool."
-        else:
-            chunks = []
-            for call in calls:
-                fn = TOOLS_MAP.get(call["name"])
-                if fn is None:
-                    chunks.append(f"{call['name']}: невідомий tool")
-                    continue
-                try:
-                    chunks.append(f"{call['name']}: {fn.invoke(call['args'] or {})}")
-                except Exception as exc:  # noqa: BLE001
-                    chunks.append(f"{call['name']}: помилка {exc}")
-            step_result = "\n".join(chunks)
+        # Вкладений граф: порожня історія + лише стиснутий context у промпті.
+        try:
+            nested = invoke_react(
+                prompt,
+                tools=EXECUTOR_TOOLS,
+                system_prompt=SYSTEM_EXECUTOR,
+                safety=SafetyLimits(
+                    max_steps=EXECUTOR_MAX_STEPS,
+                    timeout_seconds=EXECUTOR_TIMEOUT_SECONDS,
+                ),
+                reset_house_state=False,
+                trajectory_path=None,
+            )
+            step_result = (
+                _step_result_from_react(nested.get("messages") or [])
+                or "Крок без відповіді."
+            )
+            react_steps = nested.get("step_count")
+            stop = nested.get("stop_reason")
+        except Exception as exc:  # noqa: BLE001
+            # Transient API / мережа не повинні валити весь P&E-граф.
+            step_result = f"помилка вкладеного ReAct: {type(exc).__name__}: {exc}"
+            react_steps = None
+            stop = "executor_error"
 
         completed = state["completed_steps"] + [f"Крок {idx + 1}: {step_result}"]
         return {
@@ -216,7 +238,9 @@ def build_pe_graph(checkpointer=None):
             "messages": [
                 AIMessage(
                     content=(
-                        f"[EXECUTOR] step={idx + 1} tool={expected}\n{step_result}"
+                        f"[EXECUTOR/ReAct] step={idx + 1} "
+                        f"expected={expected} react_steps={react_steps} "
+                        f"stop={stop}\n{step_result}"
                     )
                 )
             ],
@@ -233,9 +257,11 @@ def build_pe_graph(checkpointer=None):
                 f"Завдання: {state['task']}\n\n"
                 f"Виконано:\n{completed_summary}\n\n"
                 f"Залишок:\n{remaining_summary}\n\n"
-                "Виріши: finish (якщо достатньо даних для рекомендацій), "
-                "continue або replan. Для finish обов'язково final_answer "
-                "з конкретним планом дій українською."
+                "Виріши: finish лише якщо зібрано достатньо ФАКТИЧНИХ даних "
+                "(температура/статуси/розклад/знання) для рекомендацій; "
+                "інакше continue або replan. Не finish після одного кроку, "
+                "якщо залишились непрочитані кроки з expected_tool. "
+                "Для finish обов'язково final_answer українською."
             )
             if decision is not None:
                 break
@@ -246,6 +272,20 @@ def build_pe_graph(checkpointer=None):
             return {"response": "Завдання виконано (fallback)."}
 
         if decision.action == "finish":
+            # Код > модель: не дозволяємо finish, поки виконано менше 2 кроків
+            # (або весь короткий план), якщо ще є залишок.
+            min_done = min(2, len(state["plan"]))
+            if remaining and state["current_step_idx"] < min_done:
+                return {
+                    "messages": [
+                        AIMessage(
+                            content=(
+                                "[REPLANNER continue forced] замало виконаних кроків "
+                                f"({state['current_step_idx']}/{min_done})"
+                            )
+                        )
+                    ]
+                }
             answer = decision.final_answer or "Підготовка дому проаналізована."
             return {
                 "response": answer,

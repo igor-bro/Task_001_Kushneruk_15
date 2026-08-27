@@ -41,7 +41,7 @@ python hitl.py approve
 
 ```text
 ReAct:     START → agent ⇄ tools → END
-P&E:       START → planner → executor → replanner ⇄ executor | END
+P&E:       START → planner → executor(вкладений ReAct) → replanner ⇄ executor | END
 HITL:      agent → safe_tools | risky_tools(interrupt_before) → agent
 ```
 
